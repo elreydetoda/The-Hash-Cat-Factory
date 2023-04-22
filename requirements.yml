@@ -1,0 +1,6 @@
+collections:
+  - elreydetoda.virtualization
+  - elreydetoda.cracking_server
+roles:
+  - name: geerlingguy.nfs
+    version: 1.5.0

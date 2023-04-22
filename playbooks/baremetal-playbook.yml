@@ -1,0 +1,288 @@
+- name: Provision the baremetal server in preparation for the hashcat vm
+  hosts: cracking_baremetal
+  become: true
+  vars:
+    vm_subnet: "192.168.121.0/24"
+    hashcat_srv_dir: /srv/hashcat
+    client_hashes_dir: '{{ hashcat_srv_dir }}/client_hashes'
+    global_hashcat_dir: /opt/hashcat
+
+  handlers:
+    - name: Restart cockpit
+      ansible.builtin.systemd:
+        name: cockpit.socket
+        state: restarted
+        daemon_reload: true
+    - name: Restart journald
+      ansible.builtin.systemd:
+        name: systemd-journald.service
+        state: restarted
+  tasks:
+
+    - name: Base setup
+      block:
+
+        - name: Upgrading system
+          ansible.builtin.apt:
+            upgrade: dist
+            update_cache: true
+
+        - name: Installing packages
+          block:
+
+            - name: Installing hypervisor
+              ansible.builtin.include_role:
+                name: elreydetoda.virtualization.kvm
+
+            - name: Gathering facts for new networks created by hypervisor install
+              ansible.builtin.setup:
+                gather_subset: network
+
+            - name: Install deps for managing hypervisor
+              ansible.builtin.package:
+                name:
+                  # installs virsh & other mgmt tools
+                  - virt-manager
+                  # installs cockpit web-ui & plugin for managing hypervisor
+                  - cockpit
+                  - cockpit-machines
+                state: present
+
+            # added because kali doesn't start the network by default
+            - name: Handling if the vm network hasn't start up
+              block:
+
+                - name: Checking if network is up and running
+                  ansible.builtin.debug:
+                    var: vm_subnet
+
+              rescue:
+                - name: Starting hypervisor interface
+                  ansible.builtin.command: virsh net-start default
+                  changed_when: false
+
+                - name: Waiting for interface to come up
+                  ansible.builtin.pause:
+                    seconds: 5
+
+                - name: Checking if network is up and running
+                  ansible.builtin.debug:
+                    var: vm_subnet
+
+            - name: Install misc system deps
+              ansible.builtin.package:
+                name:
+                  # for checking out hashcat git repo
+                  - git
+                  - python3-pip
+                  # sys mon tools
+                  - htop
+                  # used for analyzing free disk space
+                  - qdirstat
+                  # these 2 are very good gui remote connection tools
+                  - x2goserver
+                  # this one can interact with a lock screen of the physical device
+                  - x11vnc
+                  # editor
+                  - vim-gtk3
+                  # firewall
+                  - ufw
+                state: present
+
+            - name: Install dep for checking GH repos for hashcat role
+              ansible.builtin.pip:
+                name: 'github3.py'
+                state: present
+                executable: pip3
+
+        - name: Configuring hypervisor
+          block:
+
+            - name: Starting and enabling cockpit and libvirtd
+              ansible.builtin.systemd:
+                state: started
+                enabled: true
+                name: '{{ item }}'
+              loop:
+                - cockpit.socket
+                - libvirtd
+
+            - name: Installing vagrant
+              ansible.builtin.include_role:
+                name: elreydetoda.virtualization.vagrant
+              vars:
+                libvirt_pls: true
+
+        # manually install hashcat to get newest version
+        - name: Installing hashcat
+          ansible.builtin.include_role:
+            name: elreydetoda.cracking_server.hashcat
+
+    - name: Installing general services
+      block:
+
+        - name: Install and configure nfs
+          ansible.builtin.include_role:
+            name: geerlingguy.nfs
+          vars:
+            # TODO: research proper permissions
+            nfs_exports:
+              - "{{ global_hashcat_dir }} {{ vm_subnet }}(rw,sync,no_subtree_check,no_root_squash,insecure)"
+              - "{{ client_hashes_dir }} {{ vm_subnet }}(rw,sync,no_subtree_check,no_root_squash,insecure)"
+              - "{{ hashcat_srv_dir }}/vm_data {{ vm_subnet }}(rw,sync,no_subtree_check,no_root_squash,insecure)"
+
+    - name: Setuping up PCI passthrough
+      ansible.builtin.include_role:
+        name: elreydetoda.cracking_server.pcie_passthrough
+      vars:
+        enable_iommu_str: "{{ hostvars[inventory_hostname]['enable_iommu_str'] }}"
+
+    # this is for if the nfs server needs to be restarted after mods
+    - name: Force all notified handlers to run at this point, not waiting for normal sync points
+      ansible.builtin.meta: flush_handlers
+
+    - name: Setup vm w/PCI passthrough
+      ansible.builtin.include_role:
+        name: elreydetoda.cracking_server.kali_vm
+      vars:
+        pci_lanes: "{{ ansible_local['gpus']['pci_lanes'] }}"
+        vm_name: "{{ hostvars[inventory_hostname]['vm_name'] }}"
+        # made .2 instead of .1 because one server was having too much load
+        mem_amount: "{{ (ansible_memtotal_mb - (ansible_memtotal_mb * 0.2)) | round | int }}"
+        cpu_amount: "{{ ansible_processor_vcpus - 2 }}"
+
+    - name: More system configurations
+      vars:
+        journald_conf_dir: '/etc/systemd/journald.conf.d'
+      block:
+
+        # the journal filled up with nvidia errors, because the gpu's now have vfio
+        #   kernel drivers and the nvidia package can't access the GPUs, so we remove
+        #   the nvidia packages because they aren't necessary anymore and nouveau will be fine
+        - name: Removing all nvidia packages because of kernel log bloat
+          block:
+
+            - name: Identifying nvidia packages
+              ansible.builtin.shell:
+                cmd: |
+                  apt list --installed nvidia* | grep nvidia | cut -d '/' -f 1
+                executable: /bin/bash
+              register: nvidia_packages
+              changed_when: false
+              # FIXME: ansible-lint(risky-shell-pipe)
+              tags:
+                - skip_ansible_lint
+
+            - name: Removing nvidia packages
+              ansible.builtin.apt:
+                state: absent
+                autoclean: true
+                autoremove: true
+                name: '{{ item }}'
+              loop: "{{ nvidia_packages.stdout_lines }}"
+              when: nvidia_packages.stdout_lines
+              register: removed_nvidia
+
+            - name: Reboot to ensure nvidia is gone
+              ansible.builtin.reboot:
+              when: removed_nvidia.changed
+              tags:
+                - skip_ansible_lint
+
+        - name: Configure hashcat necessities
+          block:
+
+            - name: Creating client hashes directory
+              ansible.builtin.file:
+                state: directory
+                owner: root
+                group: root
+                mode: '0700'
+                path: '{{ client_hashes_dir }}'
+
+        - name: Creating journal settings folder
+          ansible.builtin.file:
+            path: '{{ journald_conf_dir }}'
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        # the journal log filled up to 4G during initial configuration
+        - name: Setting journal size limit
+          ansible.builtin.copy:
+            content: |
+              [Journal]
+              SystemMaxUse=1G
+            dest: '{{ journald_conf_dir }}/00-journal-size.conf'
+            owner: root
+            group: root
+            mode: '0644'
+          notify:
+            - Restart journald
+
+
+    # Optional: harden install as needed
+    # - name: Hardening install
+    #   block:
+
+    #     - name: Services
+    #       block:
+
+    #         - name: Cockpit configuration
+    #           vars:
+    #             cockpit_dir: '/etc/systemd/system/cockpit.socket.d/'
+    #           block:
+
+    #             - name: Create cockpit systemd config dir
+    #               ansible.builtin.file:
+    #                 path: '{{ cockpit_dir }}'
+    #                 state: directory
+    #                 owner: root
+    #                 group: root
+    #                 mode: '0755'
+
+    #             # https://cockpit-project.org/guide/latest/listen.html#listen-systemd
+    #             - name: Setting cockpit to only listen on admin interface
+    #               ansible.builtin.copy:
+    #                 dest: '{{ cockpit_dir }}/listen.conf'
+    #                 owner: root
+    #                 group: root
+    #                 mode: '0644'
+    #                 content: |
+    #                   [Socket]
+    #                   ListenStream=
+    #                   ListenStream={{ admin_interface_ip }}:443
+    #                   FreeBind=yes
+    #               notify:
+    #                 - Restart cockpit
+
+
+    #     - name: Networking
+    #       block:
+
+    #         - name: Allowing admin access to services
+    #           community.general.ufw:
+    #             rule: allow
+    #             port: '{{ item.port }}'
+    #             proto: '{{ item.proto }}'
+    #             src: '{{ admin_subnet }}'
+    #             comment: '{{ item.name }}'
+    #           loop:
+    #             - {name: 'cockpit-ws', port: '443', proto: 'tcp'}
+
+    #         - name: Allowing vm access to everything
+    #           community.general.ufw:
+    #             rule: allow
+    #             proto: '{{ item }}'
+    #             src: '{{ vm_subnet }}'
+    #             comment: 'services to vms'
+    #           loop:
+    #             - udp
+    #             - tcp
+
+    #         - name: Only allowing everywhere for ssh
+    #           community.general.ufw:
+    #             state: enabled
+    #             rule: allow
+    #             name: OpenSSH
