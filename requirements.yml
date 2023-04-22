@@ -1,6 +1,10 @@
 collections:
-  - elreydetoda.virtualization
-  - elreydetoda.cracking_server
+  - name: elreydetoda.virtualization
+    version: 1.0.62
+  - name: elreydetoda.cracking_server
+    version: 0.0.17
 roles:
   - name: geerlingguy.nfs
     version: 1.5.0
+  - name: ansible.posix
+    version: 1.5.2
