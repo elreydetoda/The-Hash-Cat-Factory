@@ -1,0 +1,305 @@
+- name: Provision the hashcat VM
+  hosts: cracking_vms
+  become: true
+  module_defaults:
+    # because of this if you see "noqa risky-file-permissions", then it's a directive to tell
+    #   ansible-lint to ignore that line because we have defined the default here
+    #   https://github.com/ansible-community/ansible-lint/issues/1070
+    ansible.builtin.file:
+      mode: '0644'
+
+    ansible.builtin.copy:
+      mode: '0644'
+
+  vars:
+    nfs_host: "{{ ansible_default_ipv4.gateway }}"
+    systemd_config_folder: '/etc/systemd/system'
+    vm_data_folder: '/mnt/vm_data'
+    extra_nfs_mounts:
+      - opt-hashcat.mount
+      - mnt-vm_data-root_home-clients.mount
+
+  pre_tasks:
+    - name: Updating apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Adding needed software
+      ansible.builtin.package:
+        state: present
+        name:
+          - nfs-common
+
+    - name: Adding vm_data mount
+      ansible.posix.mount:
+        fstype: nfs
+        opts: defaults
+        path: '{{ vm_data_folder }}'
+        src: '{{ nfs_host }}:/srv/hashcat/vm_data'
+        state: mounted
+
+    - name: Upgrading system
+      ansible.builtin.apt:
+        upgrade: dist
+
+    - name: Reboot to get system in sync
+      ansible.builtin.reboot:
+
+    - name: Nvidia setup
+      block:
+
+        - name: Nouveau blacklist kernel modules  # noqa risky-file-permissions
+          ansible.builtin.copy:
+            content: |
+              # enabling nvidia modules
+              blacklist nouveau
+              options nouveau modeset=0
+              alias nouveau off
+
+
+            dest: '/etc/modprobe.d/blacklist-nouveau.conf'
+            owner: root
+            group: root
+          register: nvidia_modules
+
+        - name: Reload modules  # noqa no-handler
+          ansible.builtin.command:
+            cmd: update-initramfs -u
+          when: nvidia_modules.changed
+          changed_when: false
+
+        - name: Reboot to blacklist nouveau  # noqa no-handler
+          ansible.builtin.reboot:
+          when: nvidia_modules.changed
+
+        # https://www.kali.org/blog/cloud-cracking-with-cuda-gpu/
+        - name: Install deps for nvidia gpus ( this will take a while )
+          ansible.builtin.package:
+            name:
+              - ocl-icd-libopencl1
+              - nvidia-driver
+              - nvidia-cuda-toolkit
+            state: present
+          register: nvidia_installed
+
+        - name: Reboot to initialize nvidia drivers  # noqa no-handler
+          ansible.builtin.reboot:
+          when: nvidia_installed.changed
+
+    - name: Configure hashcat necessities and niceties
+      vars:
+        client_hashes_dir: /root/clients
+        hashcat_wrapper_script: /usr/local/sbin/hashcat
+        # DEV: no users in staff on vm
+        # group_for_users: sudo
+      block:
+
+        - name: Checking if root home backup exists
+          ansible.builtin.stat:
+            path: '/root.orig/'
+          register: root_backup
+
+        - name: Making backup of root home
+          ansible.builtin.copy:
+            src: /root
+            dest: /root.orig
+            owner: root
+            group: root
+            mode: '0700'
+            remote_src: true
+          when: not root_backup.stat.exists
+
+        - name: Checking if /root is a symlink
+          ansible.builtin.stat:
+            path: '/root'
+          register: root_current_type
+
+        - name: Removing /root
+          ansible.builtin.file:
+            path: '/root'
+            state: absent
+          when: not root_current_type.stat.islnk
+
+        - name: Make /root symlink from nfs share
+          ansible.builtin.file:
+            src: '{{ vm_data_folder }}/root_home'
+            path: '/root'
+            state: link
+            force: true
+
+        - name: Adding other nfs mounts to systemd  # noqa risky-file-permissions
+          ansible.posix.mount:
+            fstype: nfs
+            opts: defaults
+            path: '{{ item.local_folder }}'
+            src: '{{ nfs_host }}:{{ item.nfs_folder }}'
+            state: mounted
+          loop:
+            # - {nfs_folder: '/srv/hashcat/client_hashes', local_folder: '{{ vm_data_folder }}/root_home/clients'}
+            - {nfs_folder: '/opt/hashcat', local_folder: '/opt/hashcat'}
+
+        - name: Reboot to make sure shares mount  # noqa no-handler
+          ansible.builtin.reboot:
+          # when: extra_nfs_shares.changed
+
+        # skipping risky-file-permissions because of module_defaults at top of file
+        - name: Setting hushlogin bash for root  # noqa risky-file-permissions
+          ansible.builtin.file:
+            path: '~root/.hushlogin'
+            state: touch
+          changed_when: false
+
+        - name: Adding hashcat wrapper
+          ansible.builtin.copy:
+            content: |
+              #!/usr/bin/env bash
+
+              pushd /opt/hashcat
+              ./hashcat "${@}"
+            dest: '{{ hashcat_wrapper_script }}'
+            owner: root
+            group: root
+            mode: '755'
+
+        - name: Adding symlink for hc to hashcat wrapper
+          ansible.builtin.file:
+            path: '/usr/local/sbin/hc'
+            src: '{{ hashcat_wrapper_script }}'
+            mode: '755'
+            state: link
+
+    - name: Adding more system niceties
+      block:
+
+        - name: Installing util packages
+          ansible.builtin.package:
+            state: present
+            name:
+              - vim
+              - htop
+
+
+## needed for SI use cases
+# - name: adding nfs mount systemd config  # noqa risky-file-permissions
+#   ansible.builtin.copy:
+#     content: |
+#       [Unit]
+#       Description=nfs share for vm data
+#       Before=openvpn@client.service
+
+#       [Mount]
+#       What={{ nfs_host }}:/srv/hashcat/vm_data
+#       Where={{ vm_data_folder }}
+#       Type=nfs
+
+#       [Install]
+#       WantedBy=multi-user.target
+#     dest: '{{ systemd_config_folder }}/mnt-vm_data.mount'
+#     owner: root
+#     group: root
+#   register: systemd_nfs
+
+# # for some reason the network-online.target starts before the device is actually online
+# #   or at least doesn't have an private subnet ip yet, so this service will start the
+# #   above mount file after it can successfully reach google, and also restart the vpn
+# #   connection. I got the idea from the link below
+# #   https://github.com/systemd/systemd/issues/4468#issuecomment-306727292
+# #   the ping command came from here:
+# #   https://stackoverflow.com/questions/35805354/systemd-start-service-at-boot-time-after-network-is-really-up-for-wol-purpose#answer-57469241
+# - name: adding nfs mount systemd hack  # noqa risky-file-permissions
+#   ansible.builtin.copy:
+#     content: |
+#       [Unit]
+#       Description=this is a hack for the nfs mount
+#       Requires=network-online.target
+#       After=network-online.target
+
+#       [Service]
+#       ExecStartPre=/bin/sh -c 'until ping -c1 google.com; do sleep 1 ; done;'
+#       ExecStart=/usr/bin/systemctl restart mnt-vm_data.mount
+#       ExecStop=/usr/bin/systemctl restart openvpn@client
+
+#       [Install]
+#       WantedBy=multi-user.target
+#     dest: '{{ systemd_config_folder }}/nfs-hack.service'
+#     owner: root
+#     group: root
+#   register: systemd_nfs_hack
+#   when: not files_exist.stat.exists
+# - name: enable and start nfs
+#   ansible.builtin.systemd:
+#     daemon_reload: true
+#     enabled: '{{ item.enabled }}'
+#     name: '{{ item.service_name }}'
+#   loop:
+#     - {service_name: mnt-vm_data.mount, enabled: false}
+#     - {service_name: nfs-hack.service, enabled: true}
+
+# - name: reboot to ensure vpn works
+#   ansible.builtin.reboot:
+#   when: systemd_nfs_hack.changed or systemd_nfs.changed
+
+# - name: adding other nfs mounts to systemd  # noqa risky-file-permissions
+#   ansible.builtin.copy:
+#     content: |
+#       [Unit]
+#       Description=nfs share for {{ item.name }}
+#       After=mnt-vm_data.mount
+
+#       [Mount]
+#       What={{ nfs_host }}:{{ item.nfs_folder }}
+#       Where={{ item.local_folder }}
+#       Type=nfs
+
+#       [Install]
+#       WantedBy=multi-user.target
+#     dest: "{{ systemd_config_folder }}/{{ item.local_folder.strip('/') | replace('/','-') }}.mount"
+#     owner: root
+#     group: root
+#   register: extra_nfs_shares
+#   loop:
+#     - {name: 'client hashes', nfs_folder: '/srv/hashcat/client_hashes', local_folder: '{{ vm_data_folder }}/root_home/clients'}
+#     - {name: 'hashcat executable', nfs_folder: '/opt/hashcat', local_folder: '/opt/hashcat'}
+
+# - name: enable and start nfs shares
+#   ansible.builtin.systemd:
+#     daemon_reload: true
+#     enabled: true
+#     state: started
+#     name: '{{ item }}'
+#   loop: "{{ extra_nfs_mounts }}"
+
+# we need to edit the nfs mount, so we we restart the other systemd mountpoints
+# - name: editing nfs mount systemd hack  # noqa risky-file-permissions
+#   ansible.builtin.copy:
+#     content: |
+#       [Unit]
+#       Description=this is a hack for the nfs mount
+#       Requires=network-online.target
+#       After=network-online.target
+
+#       [Service]
+#       ExecStartPre=/bin/sh -c 'until ping -c1 google.com; do sleep 1 ; done;'
+#       ExecStart=/usr/bin/systemctl restart mnt-vm_data.mount {{ extra_nfs_mounts | join(' ') }}
+#       ExecStop=/usr/bin/systemctl restart openvpn@client
+
+#       [Install]
+#       WantedBy=multi-user.target
+#     dest: '{{ systemd_config_folder }}/nfs-hack.service'
+#     owner: root
+#     group: root
+#   register: systemd_nfs_hack
+
+# - name: enable and start nfs
+#   ansible.builtin.systemd:
+#     daemon_reload: true
+#     enabled: '{{ item.enabled }}'
+#     name: '{{ item.service_name }}'
+#   loop:
+#     - {service_name: nfs-hack.service, enabled: true}
+
+# - name: reboot to ensure vpn works
+#   ansible.builtin.reboot:
+#   when: systemd_nfs_hack.changed
