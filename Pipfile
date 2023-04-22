@@ -1,0 +1,14 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+ansible-core = "2.14.4"
+
+[dev-packages]
+ansible-lint = "*"
+ansible-navigator = "*"
+
+[requires]
+python_version = "3.9"

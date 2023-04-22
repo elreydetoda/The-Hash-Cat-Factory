@@ -1,0 +1,10 @@
+{
+    "ansible.python.activationScript": ".vscode/pipenv_activation.sh",
+    "files.associations": {
+        "*-playbook.yml": "ansible"
+    },
+    "yaml.schemas": {
+        // "https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/ansible.json#/$defs/tasks": "/playbooks/**/*-tasks.yml",
+        "https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/inventory.json": "*-inventory.yml",
+    },
+}
