@@ -16,8 +16,7 @@ ansible-navigator:
       # help: False
       entries:
         ## development
-        - si_cracking-inventory.yml
-        # - <path_to_inventory_file>
+        - generic-inventory.yml
         ## production
         # - <path_to_inventory_file>
   #     playbook:
@@ -59,10 +58,10 @@ ansible-navigator:
     # container-engine: docker
     #     enabled: False
     # environment-variables:
-      #       pass:
-      #         - ONE
-      #         - TWO
-      #         - THREE
+    #       pass:
+    #         - ONE
+    #         - TWO
+    #         - THREE
     #        set:
     #         KEY1: VALUE1
     #         KEY2: VALUE2
@@ -78,7 +77,10 @@ ansible-navigator:
     volume-mounts:
       - src: "/home/<user>/.ansible"
         dest: "/home/runner/.ansible/"
-    #   options: "ro"
+      #   options: "ro"
+      # - src: "/home/<user>/.ssh"
+      #   dest: "/home/runner/.ssh/"
+      #   options: "ro"
     container-options:
       - "--net=host"
   #

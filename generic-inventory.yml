@@ -1,0 +1,40 @@
+---
+all:
+  # hosts:
+  children:
+    cracking_baremetal:
+      children:
+        intel_processor:
+    cracking_vms:
+      children:
+        cracking_vm:
+    amd_processor:
+      vars:
+        enable_iommu_str: "amd_iommu=on"
+    intel_processor:
+      children:
+        baremetal:
+      vars:
+        enable_iommu_str: "intel_iommu=on"
+    baremetal:
+      hosts:
+        # configured hostname in ~/.ssh/config
+        baremetal_host:
+    cracking_vm:
+      hosts:
+        # configured hostname in ~/.ssh/config
+        cracking_vm_host:
+  vars:
+    ansible_python_interpreter: "/usr/bin/env python3"
+    vm_name: kali-demo
+## src: https://www.jeffgeerling.com/blog/2022/using-ansible-playbook-ssh-bastion-jump-host
+## settings from ~/.ssh/config
+# Host baremetal_host
+#   Hostname <baremetal_ip_address>
+#   IdentityFile <ssh_key>
+#   User <user>
+# Host cracking_vm_host
+#   Hostname <vm_ip_address>
+#   ProxyJump baremetal_host
+#   IdentityFile <ssh_key>
+#   User vagrant
