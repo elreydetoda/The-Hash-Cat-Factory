@@ -1,4 +1,4 @@
-- name: Provision the baremetal server in preparation for the hashcat vm
+- name: Provision the baremetal server in preparation & deploy the hashcat vm
   hosts: cracking_baremetal
   become: true
   vars:
@@ -26,6 +26,7 @@
           ansible.builtin.apt:
             upgrade: dist
             update_cache: true
+            cache_valid_time: 3600
 
         - name: Installing packages
           block:
