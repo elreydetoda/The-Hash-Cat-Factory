@@ -13,4 +13,4 @@ More detailed instructions coming soon, but for now you can look at my slides/pr
 
 Slide deck with speaker notes added:
 
-[![slide deck cover image](https://media.slid.es/thumbnails/1d63a16ec9701dbf0c7f3d7f23118f19/thumb.jpg)](https://slides.com/elrey741/the-hashcat-factory)
+[![slide deck cover image](https://media.slid.es/thumbnails/1d63a16ec9701dbf0c7f3d7f23118f19/thumb.jpg)](https://elrey.casa/prez/cat-factory)
